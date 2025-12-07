@@ -27,6 +27,66 @@ import subprocess
 import sys
 
 
+class GeometryUtils:
+    """几何计算工具类"""
+    
+    @staticmethod
+    def ccw(A, B, C):
+        """判断三点是否逆时针排列"""
+        return (C[1] - A[1]) * (B[0] - A[0]) > (B[1] - A[1]) * (C[0] - A[0])
+    
+    @staticmethod
+    def segments_intersect(A, B, C, D):
+        """
+        检测两条线段是否相交（不包括端点重合的情况）
+        
+        Args:
+            A, B: 第一条线段的两个端点
+            C, D: 第二条线段的两个端点
+        
+        Returns:
+            True 如果线段相交，False 否则
+        """
+        # 排除端点重合的情况
+        eps = 1e-10
+        if (abs(A[0] - C[0]) < eps and abs(A[1] - C[1]) < eps) or \
+           (abs(A[0] - D[0]) < eps and abs(A[1] - D[1]) < eps) or \
+           (abs(B[0] - C[0]) < eps and abs(B[1] - C[1]) < eps) or \
+           (abs(B[0] - D[0]) < eps and abs(B[1] - D[1]) < eps):
+            return False
+        
+        return (GeometryUtils.ccw(A, C, D) != GeometryUtils.ccw(B, C, D) and 
+                GeometryUtils.ccw(A, B, C) != GeometryUtils.ccw(A, B, D))
+    
+    @staticmethod
+    def check_new_segment_intersects(points, new_point):
+        """
+        检查新增点形成的线段是否与现有线段相交
+        
+        Args:
+            points: 现有控制点列表
+            new_point: 新增的点
+        
+        Returns:
+            (bool, str): (是否相交, 相交描述)
+        """
+        if len(points) < 2:
+            return False, ""
+        
+        # 新线段：从最后一个点到新点
+        last_point = points[-1]
+        new_segment = (last_point, new_point)
+        
+        # 检查与所有现有线段（除了相邻的）是否相交
+        for i in range(len(points) - 2):  # 不检查最后一条线段（与新线段共享端点）
+            segment = (points[i], points[i + 1])
+            if GeometryUtils.segments_intersect(new_segment[0], new_segment[1], 
+                                                 segment[0], segment[1]):
+                return True, f"与线段 {i+1}-{i+2} 相交"
+        
+        return False, ""
+
+
 class CatmullRomSpline:
     """Catmull-Rom 样条曲线计算"""
     
@@ -338,14 +398,74 @@ class TrackCurveEditor:
             self.selected_point_index = idx
             self.dragging = True
         else:
-            # 添加新点
-            self._save_history()
+            # 尝试添加新点
             world_pos = self._canvas_to_world(event.x, event.y)
+            
+            # 检查是否与现有线段相交
+            intersects, msg = GeometryUtils.check_new_segment_intersects(
+                self.control_points, world_pos
+            )
+            
+            if intersects:
+                # 不允许放置，显示闪烁效果和提示
+                self._show_invalid_point_animation(event.x, event.y, msg)
+                return
+            
+            # 合法，添加新点
+            self._save_history()
             self.control_points.append(world_pos)
             self.selected_point_index = len(self.control_points) - 1
         
         self._update_info()
         self._draw_canvas()
+    
+    def _show_invalid_point_animation(self, x, y, error_msg):
+        """显示无效点的闪烁动画和错误提示"""
+        # 创建闪烁的点
+        flash_id = None
+        flash_count = [0]  # 使用列表以便在闭包中修改
+        max_flashes = 6
+        
+        # 更新状态栏显示错误
+        original_status = self.status_var.get()
+        self.status_var.set(f"❌ 无法放置: {error_msg}")
+        
+        def flash():
+            nonlocal flash_id
+            
+            if flash_count[0] >= max_flashes:
+                # 动画结束，删除闪烁的点
+                if flash_id:
+                    self.canvas.delete(flash_id)
+                # 恢复状态栏
+                self.root.after(1000, lambda: self.status_var.set(original_status))
+                return
+            
+            # 交替显示/隐藏
+            if flash_count[0] % 2 == 0:
+                # 显示红色警告点
+                flash_id = self.canvas.create_oval(
+                    x - 10, y - 10, x + 10, y + 10,
+                    fill='#ff0000', outline='#ffff00', width=3,
+                    tags='flash_point'
+                )
+                # 显示错误连线
+                if len(self.control_points) >= 1:
+                    last_pt = self._world_to_canvas(*self.control_points[-1])
+                    self.canvas.create_line(
+                        last_pt[0], last_pt[1], x, y,
+                        fill='#ff0000', width=2, dash=(6, 3),
+                        tags='flash_point'
+                    )
+            else:
+                # 隐藏
+                self.canvas.delete('flash_point')
+            
+            flash_count[0] += 1
+            self.root.after(150, flash)
+        
+        # 开始闪烁动画
+        flash()
     
     def _on_drag(self, event):
         """鼠标拖动"""
@@ -410,9 +530,10 @@ class TrackCurveEditor:
         
         # 绘制平滑曲线
         if self.show_curve.get() and len(self.control_points) >= 3:
+            segments_per_section = 20
             curve_points = CatmullRomSpline.generate_curve(
                 self.control_points, 
-                segments_per_section=20,
+                segments_per_section=segments_per_section,
                 closed=self.closed_curve.get()
             )
             
@@ -420,28 +541,45 @@ class TrackCurveEditor:
                 # 转换为画布坐标
                 canvas_curve = [self._world_to_canvas(p[0], p[1]) for p in curve_points]
                 
-                # 绘制曲线
-                flat_coords = []
-                for p in canvas_curve:
-                    flat_coords.extend(p)
+                n = len(self.control_points)
                 
-                # 闭合曲线
-                if self.closed_curve.get():
-                    flat_coords.extend(canvas_curve[0])
-                
-                self.canvas.create_line(*flat_coords, fill='#00ff88', width=2, smooth=True)
+                if self.closed_curve.get() and n >= 3:
+                    # 分开绘制：主要部分（实线）和最后一段（虚线弱化）
+                    # 最后一段是从第 (n-1)*segments_per_section 个点开始
+                    last_segment_start = (n - 1) * segments_per_section
+                    
+                    # 绘制主要部分（前 n-1 段）- 实线
+                    if last_segment_start > 0:
+                        main_coords = []
+                        for p in canvas_curve[:last_segment_start + 1]:  # +1 确保衔接
+                            main_coords.extend(p)
+                        self.canvas.create_line(*main_coords, fill='#00ff88', width=2, smooth=True)
+                    
+                    # 绘制最后一段（第 n 段，闭合部分）- 虚线弱化
+                    last_coords = []
+                    for p in canvas_curve[last_segment_start:]:
+                        last_coords.extend(p)
+                    # 闭合到起点
+                    last_coords.extend(canvas_curve[0])
+                    self.canvas.create_line(
+                        *last_coords, 
+                        fill='#00aa66',  # 更淡的绿色
+                        width=2, 
+                        smooth=True,
+                        dash=(12, 10)  # 虚线（更大间隔）
+                    )
+                else:
+                    # 非闭合曲线，全部用实线
+                    flat_coords = []
+                    for p in canvas_curve:
+                        flat_coords.extend(p)
+                    self.canvas.create_line(*flat_coords, fill='#00ff88', width=2, smooth=True)
         
-        # 绘制控制点连线
+        # 绘制控制点连线（辅助线）
         if len(self.control_points) >= 2:
             for i in range(len(self.control_points) - 1):
                 p1 = self._world_to_canvas(*self.control_points[i])
                 p2 = self._world_to_canvas(*self.control_points[i + 1])
-                self.canvas.create_line(p1[0], p1[1], p2[0], p2[1], fill='#444444', width=1, dash=(4, 4))
-            
-            # 闭合连线
-            if self.closed_curve.get() and len(self.control_points) >= 3:
-                p1 = self._world_to_canvas(*self.control_points[-1])
-                p2 = self._world_to_canvas(*self.control_points[0])
                 self.canvas.create_line(p1[0], p1[1], p2[0], p2[1], fill='#444444', width=1, dash=(4, 4))
         
         # 绘制控制点
