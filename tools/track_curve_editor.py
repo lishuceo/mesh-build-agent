@@ -85,6 +85,106 @@ class GeometryUtils:
                 return True, f"与线段 {i+1}-{i+2} 相交"
         
         return False, ""
+    
+    @staticmethod
+    def point_to_segment_distance(point, seg_start, seg_end):
+        """
+        计算点到线段的最短距离
+        
+        Args:
+            point: 目标点 (x, y)
+            seg_start: 线段起点 (x, y)
+            seg_end: 线段终点 (x, y)
+        
+        Returns:
+            点到线段的最短距离
+        """
+        px, py = point
+        x1, y1 = seg_start
+        x2, y2 = seg_end
+        
+        dx = x2 - x1
+        dy = y2 - y1
+        
+        # 如果线段退化为点
+        if dx == 0 and dy == 0:
+            return math.sqrt((px - x1)**2 + (py - y1)**2)
+        
+        # 计算点在线段上的投影参数 t
+        t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
+        
+        # 投影点坐标
+        proj_x = x1 + t * dx
+        proj_y = y1 + t * dy
+        
+        return math.sqrt((px - proj_x)**2 + (py - proj_y)**2)
+    
+    @staticmethod
+    def segment_to_segment_distance(seg1_start, seg1_end, seg2_start, seg2_end):
+        """
+        计算两条线段之间的最短距离
+        
+        Args:
+            seg1_start, seg1_end: 第一条线段的端点
+            seg2_start, seg2_end: 第二条线段的端点
+        
+        Returns:
+            两线段之间的最短距离
+        """
+        # 如果线段相交，距离为0
+        if GeometryUtils.segments_intersect(seg1_start, seg1_end, seg2_start, seg2_end):
+            return 0
+        
+        # 计算4个点到对方线段的距离，取最小值
+        d1 = GeometryUtils.point_to_segment_distance(seg1_start, seg2_start, seg2_end)
+        d2 = GeometryUtils.point_to_segment_distance(seg1_end, seg2_start, seg2_end)
+        d3 = GeometryUtils.point_to_segment_distance(seg2_start, seg1_start, seg1_end)
+        d4 = GeometryUtils.point_to_segment_distance(seg2_end, seg1_start, seg1_end)
+        
+        return min(d1, d2, d3, d4)
+    
+    @staticmethod
+    def check_min_distance_to_path(points, new_point, min_distance):
+        """
+        检查新点与非相邻路径段的最小距离
+        
+        Args:
+            points: 现有控制点列表
+            new_point: 新增的点
+            min_distance: 最小允许距离
+        
+        Returns:
+            (bool, str, float): (是否过近, 描述, 最小距离)
+        """
+        if len(points) < 3:
+            return False, "", float('inf')
+        
+        # 新线段：从最后一个点到新点
+        last_point = points[-1]
+        
+        min_found_dist = float('inf')
+        too_close_segment = None
+        
+        # 检查与所有非相邻线段的距离
+        # 排除最后两条线段（与新线段相邻）
+        for i in range(len(points) - 2):
+            seg_start = points[i]
+            seg_end = points[i + 1]
+            
+            # 计算新线段与该线段的距离
+            dist = GeometryUtils.segment_to_segment_distance(
+                last_point, new_point, seg_start, seg_end
+            )
+            
+            if dist < min_found_dist:
+                min_found_dist = dist
+                if dist < min_distance:
+                    too_close_segment = (i + 1, i + 2)
+        
+        if too_close_segment:
+            return True, f"与线段 {too_close_segment[0]}-{too_close_segment[1]} 距离过近 ({min_found_dist:.1f}m)", min_found_dist
+        
+        return False, "", min_found_dist
 
 
 class CatmullRomSpline:
@@ -190,6 +290,8 @@ class TrackCurveEditor:
         self.show_curve = tk.BooleanVar(value=True)
         self.show_points = tk.BooleanVar(value=True)
         self.closed_curve = tk.BooleanVar(value=True)
+        self.show_track_width = tk.BooleanVar(value=True)  # 显示赛道宽度预览
+        self.check_overlap = tk.BooleanVar(value=True)     # 检测路径重叠
         
         # 赛道参数
         self.track_width = tk.DoubleVar(value=6.0)
@@ -263,6 +365,10 @@ class TrackCurveEditor:
         ttk.Checkbutton(display_frame, text="显示控制点", variable=self.show_points,
                        command=self._draw_canvas).pack(anchor='w', padx=5)
         ttk.Checkbutton(display_frame, text="闭合曲线", variable=self.closed_curve,
+                       command=self._draw_canvas).pack(anchor='w', padx=5)
+        ttk.Checkbutton(display_frame, text="显示赛道宽度预览", variable=self.show_track_width,
+                       command=self._draw_canvas).pack(anchor='w', padx=5)
+        ttk.Checkbutton(display_frame, text="检测路径重叠", variable=self.check_overlap,
                        command=self._draw_canvas).pack(anchor='w', padx=5)
         
         # === 赛道参数 ===
@@ -411,6 +517,18 @@ class TrackCurveEditor:
                 self._show_invalid_point_animation(event.x, event.y, msg)
                 return
             
+            # 检查是否与非相邻路径段距离过近（如果启用了重叠检测）
+            if self.check_overlap.get():
+                min_distance = self.track_width.get()  # 最小安全距离 = 赛道宽度
+                too_close, close_msg, dist = GeometryUtils.check_min_distance_to_path(
+                    self.control_points, world_pos, min_distance
+                )
+                
+                if too_close:
+                    # 显示警告但允许放置（用户可以选择忽略）
+                    self._show_distance_warning_animation(event.x, event.y, close_msg)
+                    # 仍然允许添加，但给出警告
+            
             # 合法，添加新点
             self._save_history()
             self.control_points.append(world_pos)
@@ -418,6 +536,14 @@ class TrackCurveEditor:
         
         self._update_info()
         self._draw_canvas()
+    
+    def _show_distance_warning_animation(self, x, y, warning_msg):
+        """显示距离过近的警告（但不阻止放置）"""
+        # 更新状态栏显示警告
+        self.status_var.set(f"⚠️ 警告: {warning_msg}")
+        
+        # 1.5秒后恢复状态栏
+        self.root.after(2000, lambda: self.status_var.set("点击画布添加控制点"))
     
     def _show_invalid_point_animation(self, x, y, error_msg):
         """显示无效点的闪烁动画和错误提示"""
@@ -582,6 +708,14 @@ class TrackCurveEditor:
                 p2 = self._world_to_canvas(*self.control_points[i + 1])
                 self.canvas.create_line(p1[0], p1[1], p2[0], p2[1], fill='#444444', width=1, dash=(4, 4))
         
+        # 绘制赛道宽度预览（边界线）
+        if self.show_track_width.get() and len(self.control_points) >= 3:
+            self._draw_track_width_preview()
+        
+        # 检测并高亮重叠区域
+        if self.check_overlap.get() and len(self.control_points) >= 3:
+            self._draw_overlap_warnings()
+        
         # 绘制控制点
         if self.show_points.get():
             for i, pt in enumerate(self.control_points):
@@ -602,6 +736,127 @@ class TrackCurveEditor:
                 
                 # 显示序号
                 self.canvas.create_text(cx + 12, cy - 12, text=str(i + 1), fill='white', font=('Arial', 9))
+    
+    def _draw_track_width_preview(self):
+        """绘制赛道宽度预览（两侧边界线）"""
+        segments_per_section = 20
+        curve_points = CatmullRomSpline.generate_curve(
+            self.control_points, 
+            segments_per_section=segments_per_section,
+            closed=self.closed_curve.get()
+        )
+        
+        if len(curve_points) < 3:
+            return
+        
+        half_width = self.track_width.get() / 2
+        
+        left_boundary = []
+        right_boundary = []
+        
+        n = len(curve_points)
+        for i in range(n):
+            # 计算切向量（使用相邻点）
+            prev_i = (i - 1) % n
+            next_i = (i + 1) % n
+            
+            tx = curve_points[next_i][0] - curve_points[prev_i][0]
+            ty = curve_points[next_i][1] - curve_points[prev_i][1]
+            length = math.sqrt(tx * tx + ty * ty)
+            
+            if length > 0.001:
+                # 归一化切向量
+                tx /= length
+                ty /= length
+                
+                # 法向量（垂直于切向量）
+                nx, ny = -ty, tx
+                
+                # 左右边界点
+                left_pt = (
+                    curve_points[i][0] + nx * half_width,
+                    curve_points[i][1] + ny * half_width
+                )
+                right_pt = (
+                    curve_points[i][0] - nx * half_width,
+                    curve_points[i][1] - ny * half_width
+                )
+                
+                left_boundary.append(left_pt)
+                right_boundary.append(right_pt)
+        
+        # 绘制左边界（半透明蓝色）
+        if len(left_boundary) >= 2:
+            left_coords = []
+            for pt in left_boundary:
+                canvas_pt = self._world_to_canvas(pt[0], pt[1])
+                left_coords.extend(canvas_pt)
+            if self.closed_curve.get():
+                left_coords.extend(self._world_to_canvas(left_boundary[0][0], left_boundary[0][1]))
+            self.canvas.create_line(*left_coords, fill='#4488ff', width=1, dash=(3, 3))
+        
+        # 绘制右边界（半透明蓝色）
+        if len(right_boundary) >= 2:
+            right_coords = []
+            for pt in right_boundary:
+                canvas_pt = self._world_to_canvas(pt[0], pt[1])
+                right_coords.extend(canvas_pt)
+            if self.closed_curve.get():
+                right_coords.extend(self._world_to_canvas(right_boundary[0][0], right_boundary[0][1]))
+            self.canvas.create_line(*right_coords, fill='#4488ff', width=1, dash=(3, 3))
+    
+    def _draw_overlap_warnings(self):
+        """检测并高亮显示重叠区域"""
+        segments_per_section = 10  # 使用较少的采样点加快计算
+        curve_points = CatmullRomSpline.generate_curve(
+            self.control_points, 
+            segments_per_section=segments_per_section,
+            closed=self.closed_curve.get()
+        )
+        
+        if len(curve_points) < 10:
+            return
+        
+        min_dist = self.track_width.get()  # 最小安全距离 = 赛道宽度
+        n = len(curve_points)
+        
+        overlap_points = []
+        
+        # 检测非相邻点之间的距离
+        # 跳过相邻的点（约10个点的范围，对应半个控制点段）
+        skip_range = max(segments_per_section, 10)
+        
+        for i in range(n):
+            for j in range(i + skip_range, n):
+                # 跳过闭合处相邻的点
+                if self.closed_curve.get() and (n - j + i) < skip_range:
+                    continue
+                
+                p1 = curve_points[i]
+                p2 = curve_points[j]
+                
+                dist = math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+                
+                if dist < min_dist:
+                    overlap_points.append((p1, p2, dist))
+        
+        # 高亮显示重叠区域
+        for p1, p2, dist in overlap_points:
+            c1 = self._world_to_canvas(p1[0], p1[1])
+            c2 = self._world_to_canvas(p2[0], p2[1])
+            
+            # 绘制警告标记（红色半透明圆）
+            self.canvas.create_oval(
+                c1[0] - 6, c1[1] - 6, c1[0] + 6, c1[1] + 6,
+                fill='#ff4444', outline='#ffff00', width=1,
+                stipple='gray50'
+            )
+            
+            # 绘制连线显示重叠位置
+            self.canvas.create_line(
+                c1[0], c1[1], c2[0], c2[1],
+                fill='#ff6600', width=1, dash=(2, 4)
+            )
     
     def _draw_grid(self):
         """绘制网格"""
