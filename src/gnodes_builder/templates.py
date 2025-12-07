@@ -498,7 +498,7 @@ def _create_track_along_path(name: str,
     bm = bmesh.new()
     
     # 预计算平滑切线
-    smoothing_window = max(3, n // 20)  # 根据路径长度动态调整窗口
+    smoothing_window = max(3, n // 20)
     tangents = _compute_smooth_tangents(path_points, smoothing_window)
     
     all_sections = []
@@ -868,6 +868,128 @@ def generate_custom_path(waypoints: List[Tuple[float, float]],
 
 # ========== 层次3：高级模板函数（AI Agent 调用）==========
 
+def _limit_path_curvature(path: List[Tuple[float, float, float]],
+                          track_width: float,
+                          max_iterations: int = 50) -> List[Tuple[float, float, float]]:
+    """
+    限制路径的最大转弯角度，从源头上防止边缘交叉
+    
+    核心原理：如果转弯角度过大，内侧边缘会交叉。
+    通过迭代平滑，将所有超过安全阈值的转弯角度降低。
+    
+    安全角度计算：
+    - 假设点间距为 d，赛道半宽为 w
+    - 内侧边缘点间距约为 d - 2*w*sin(θ/2)
+    - 要保证内侧不交叉，需要 d > 2*w*sin(θ/2)
+    - 即 θ < 2*arcsin(d/(2*w))
+    
+    Args:
+        path: 原始路径点
+        track_width: 赛道宽度（用于计算安全转弯角度）
+        max_iterations: 最大迭代次数
+    
+    Returns:
+        处理后的路径点（转弯角度受限）
+    """
+    n = len(path)
+    if n < 4:
+        return path
+    
+    # 转换为可修改的列表
+    points = [list(p) for p in path]
+    half_width = track_width / 2
+    
+    def get_turn_angle(i):
+        """计算点 i 处的转弯角度"""
+        prev_i = (i - 1) % n
+        next_i = (i + 1) % n
+        
+        # 入射方向
+        dx1 = points[i][0] - points[prev_i][0]
+        dy1 = points[i][1] - points[prev_i][1]
+        len1 = math.sqrt(dx1*dx1 + dy1*dy1)
+        
+        # 出射方向
+        dx2 = points[next_i][0] - points[i][0]
+        dy2 = points[next_i][1] - points[i][1]
+        len2 = math.sqrt(dx2*dx2 + dy2*dy2)
+        
+        if len1 < 0.001 or len2 < 0.001:
+            return 0, 0, 0  # angle, segment_length, direction
+        
+        # 归一化
+        dx1, dy1 = dx1/len1, dy1/len1
+        dx2, dy2 = dx2/len2, dy2/len2
+        
+        # 计算角度（使用点积和叉积）
+        dot = dx1*dx2 + dy1*dy2
+        cross = dx1*dy2 - dy1*dx2
+        
+        # 限制 dot 在 [-1, 1] 范围内
+        dot = max(-1.0, min(1.0, dot))
+        angle = math.acos(dot)  # 转弯角度（0 = 直行，π = 180度转弯）
+        
+        # 平均段长度
+        avg_len = (len1 + len2) / 2
+        
+        return angle, avg_len, cross  # cross 的符号表示转弯方向
+    
+    def get_safe_angle(segment_length):
+        """根据段长度计算安全的最大转弯角度"""
+        if segment_length < 0.001:
+            return 0.1
+        
+        # 安全条件：内侧边缘点间距 > 0
+        # d - 2*w*sin(θ/2) > 0
+        # sin(θ/2) < d/(2*w)
+        ratio = segment_length / (2 * half_width)
+        
+        if ratio >= 1.0:
+            # 段长度足够长，允许较大转弯
+            return math.pi * 0.4  # 最大约 72 度
+        else:
+            # 段长度较短，限制转弯角度
+            # 留一些余量（乘以 0.8）
+            safe_sin = ratio * 0.8
+            safe_sin = max(0.05, min(0.99, safe_sin))
+            return 2 * math.asin(safe_sin)
+    
+    # 迭代平滑
+    for iteration in range(max_iterations):
+        max_excess = 0  # 记录最大超标量
+        
+        for i in range(n):
+            angle, seg_len, direction = get_turn_angle(i)
+            safe_angle = get_safe_angle(seg_len)
+            
+            if angle > safe_angle:
+                excess = angle - safe_angle
+                max_excess = max(max_excess, excess)
+                
+                # 平滑：将该点向邻居的平均位置移动
+                prev_i = (i - 1) % n
+                next_i = (i + 1) % n
+                
+                # 计算邻居的平均位置
+                avg_x = (points[prev_i][0] + points[next_i][0]) / 2
+                avg_y = (points[prev_i][1] + points[next_i][1]) / 2
+                avg_z = (points[prev_i][2] + points[next_i][2]) / 2
+                
+                # 平滑系数：超标越多，平滑越强
+                # 但不要一次移动太多，避免振荡
+                smooth_factor = min(0.3, excess / math.pi)
+                
+                points[i][0] += (avg_x - points[i][0]) * smooth_factor
+                points[i][1] += (avg_y - points[i][1]) * smooth_factor
+                points[i][2] += (avg_z - points[i][2]) * smooth_factor
+        
+        # 如果所有点都在安全范围内，提前退出
+        if max_excess < 0.01:  # 约 0.5 度的容差
+            break
+    
+    return [tuple(p) for p in points]
+
+
 def _resample_path_uniform(path: List[Tuple[float, float, float]], 
                            target_spacing: float = None,
                            min_points: int = 100) -> List[Tuple[float, float, float]]:
@@ -996,6 +1118,9 @@ def create_track_from_path(
     if resample:
         # 根据赛道宽度计算合适的采样间距（约每半个赛道宽度一个点）
         path = _resample_path_uniform(path, target_spacing=track_width / 3, min_points=100)
+    
+    # ⭐ 关键改进：限制路径的最大转弯角度，从源头上防止边缘交叉
+    path = _limit_path_curvature(path, track_width)
     
     # 偏移路径到指定位置
     offset_path = [(px + x, py + y, pz + z) for px, py, pz in path]
@@ -1231,10 +1356,16 @@ def create_figure8_track(
     # 1. 生成8字形路径
     path_points = generate_figure8_path(size, bridge_height, segments)
     
+    # 2. 均匀重采样
+    path_points = _resample_path_uniform(path_points, target_spacing=track_width / 3, min_points=100)
+    
+    # 3. ⭐ 限制最大转弯角度，防止边缘交叉
+    path_points = _limit_path_curvature(path_points, track_width)
+    
     # 偏移到指定位置
     path_points = [(px + x, py + y, pz + z) for px, py, pz in path_points]
     
-    # 2. 创建赛道路面
+    # 4. 创建赛道路面
     track_surface = _create_track_along_path(
         f"{name}_Surface",
         path_points,
@@ -1243,7 +1374,7 @@ def create_figure8_track(
     )
     objects.append(track_surface)
     
-    # 3. 创建护栏
+    # 5. 创建护栏
     if include_barriers:
         outer_barrier = _create_barrier_along_path(
             f"{name}_Outer_Barrier",
@@ -1322,10 +1453,16 @@ def create_custom_track(
     # 1. 生成平滑路径
     path_points = generate_custom_path(waypoints, height_profile, segments_per_section)
     
+    # 2. 均匀重采样
+    path_points = _resample_path_uniform(path_points, target_spacing=track_width / 3, min_points=100)
+    
+    # 3. ⭐ 关键：限制最大转弯角度，从源头上防止边缘交叉
+    path_points = _limit_path_curvature(path_points, track_width)
+    
     # 偏移到指定位置
     path_points = [(px + x, py + y, pz + z) for px, py, pz in path_points]
     
-    # 2. 创建赛道路面
+    # 4. 创建赛道路面
     track_surface = _create_track_along_path(
         f"{name}_Surface",
         path_points,
