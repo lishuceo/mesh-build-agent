@@ -379,6 +379,160 @@ def _smooth_height_transitions(points: List[Tuple[float, float, float]],
 
 # ========== 层次1：底层网格生成函数 ==========
 
+def _compute_curvature_radius(path_points: List[Tuple[float, float, float]], 
+                               index: int) -> float:
+    """
+    计算路径点处的曲率半径（使用三点外接圆）
+    
+    Args:
+        path_points: 路径点列表
+        index: 当前点的索引
+    
+    Returns:
+        曲率半径（越小表示弯曲越急，直线返回 inf）
+    """
+    n = len(path_points)
+    if n < 3:
+        return float('inf')
+    
+    # 获取前后点
+    prev_i = (index - 1) % n
+    next_i = (index + 1) % n
+    
+    p0 = path_points[prev_i]
+    p1 = path_points[index]
+    p2 = path_points[next_i]
+    
+    # 计算三边长度
+    a = math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)  # p1-p2
+    b = math.sqrt((p0[0] - p2[0])**2 + (p0[1] - p2[1])**2)  # p0-p2
+    c = math.sqrt((p0[0] - p1[0])**2 + (p0[1] - p1[1])**2)  # p0-p1
+    
+    # 使用海伦公式计算面积
+    s = (a + b + c) / 2
+    area_sq = s * (s - a) * (s - b) * (s - c)
+    
+    if area_sq <= 0:
+        # 三点共线
+        return float('inf')
+    
+    area = math.sqrt(area_sq)
+    
+    # 外接圆半径 R = abc / (4 * area)
+    if area < 0.0001:
+        return float('inf')
+    
+    radius = (a * b * c) / (4 * area)
+    
+    return radius
+
+
+def _compute_curvature_radii(path_points: List[Tuple[float, float, float]], 
+                              smoothing_window: int = 2) -> List[float]:
+    """
+    计算所有路径点的平滑曲率半径
+    
+    Args:
+        path_points: 路径点列表
+        smoothing_window: 平滑窗口大小
+    
+    Returns:
+        每个点的曲率半径列表
+    """
+    n = len(path_points)
+    raw_radii = []
+    
+    # 计算原始曲率半径
+    for i in range(n):
+        r = _compute_curvature_radius(path_points, i)
+        raw_radii.append(r)
+    
+    # 平滑处理（取局部最小值，保守处理急弯）
+    smoothed_radii = []
+    for i in range(n):
+        min_r = raw_radii[i]
+        for offset in range(-smoothing_window, smoothing_window + 1):
+            idx = (i + offset) % n
+            min_r = min(min_r, raw_radii[idx])
+        smoothed_radii.append(min_r)
+    
+    return smoothed_radii
+
+
+def _get_adaptive_offsets(curvature_radius: float, half_width: float, 
+                          turn_direction: float) -> Tuple[float, float]:
+    """
+    根据曲率半径计算内外侧的自适应偏移距离
+    
+    Args:
+        curvature_radius: 曲率半径
+        half_width: 赛道半宽
+        turn_direction: 转弯方向（正=左转，负=右转，用于确定哪侧是内侧）
+    
+    Returns:
+        (left_offset, right_offset): 左右两侧的偏移距离
+    """
+    # 如果曲率半径很大（接近直线），正常偏移
+    if curvature_radius > half_width * 3:
+        return half_width, half_width
+    
+    # 内侧的安全偏移：不能超过曲率半径
+    # 留一些余量，避免刚好在边界
+    safe_inner_offset = max(0.1, min(half_width, curvature_radius * 0.85 - 0.1))
+    
+    # 根据转弯方向决定哪侧是内侧
+    # turn_direction > 0 表示左转，左侧是内侧
+    # turn_direction < 0 表示右转，右侧是内侧
+    if turn_direction > 0.001:
+        # 左转：左侧是内侧，需要收缩
+        left_offset = safe_inner_offset
+        right_offset = half_width
+    elif turn_direction < -0.001:
+        # 右转：右侧是内侧，需要收缩
+        left_offset = half_width
+        right_offset = safe_inner_offset
+    else:
+        # 直行
+        left_offset = half_width
+        right_offset = half_width
+    
+    return left_offset, right_offset
+
+
+def _compute_turn_directions(path_points: List[Tuple[float, float, float]], 
+                              tangents: List[Tuple[float, float]]) -> List[float]:
+    """
+    计算每个点的转弯方向（使用叉积）
+    
+    Args:
+        path_points: 路径点列表
+        tangents: 切线方向列表
+    
+    Returns:
+        转弯方向列表（正=左转，负=右转）
+    """
+    n = len(path_points)
+    directions = []
+    
+    for i in range(n):
+        prev_i = (i - 1) % n
+        next_i = (i + 1) % n
+        
+        # 入射方向
+        dx1 = path_points[i][0] - path_points[prev_i][0]
+        dy1 = path_points[i][1] - path_points[prev_i][1]
+        
+        # 出射方向
+        dx2 = path_points[next_i][0] - path_points[i][0]
+        dy2 = path_points[next_i][1] - path_points[i][1]
+        
+        # 叉积确定转弯方向
+        cross = dx1 * dy2 - dy1 * dx2
+        directions.append(cross)
+    
+    return directions
+
+
 def _compute_smooth_tangents(path_points: List[Tuple[float, float, float]], 
                               smoothing_window: int = 3) -> List[Tuple[float, float]]:
     """
@@ -472,15 +626,19 @@ def _compute_smooth_tangents(path_points: List[Tuple[float, float, float]],
 def _create_track_along_path(name: str, 
                               path_points: List[Tuple[float, float, float]],
                               width: float, 
-                              thickness: float) -> bpy.types.Object:
+                              thickness: float,
+                              adaptive_width: bool = True) -> bpy.types.Object:
     """
     沿任意路径创建赛道网格（核心底层函数）
+    
+    使用自适应内侧偏移：在急弯处自动收缩内侧边界，防止交叉。
     
     Args:
         name: 网格名称
         path_points: 闭合路径点列表 [(x, y, z), ...]
         width: 赛道宽度
         thickness: 赛道厚度
+        adaptive_width: 是否启用自适应宽度（防止急弯处交叉）
     
     Returns:
         创建的网格对象
@@ -501,22 +659,41 @@ def _create_track_along_path(name: str,
     smoothing_window = max(3, n // 20)
     tangents = _compute_smooth_tangents(path_points, smoothing_window)
     
-    all_sections = []
     half_width = width / 2
+    
+    # 如果启用自适应宽度，计算曲率和转弯方向
+    if adaptive_width:
+        curvature_radii = _compute_curvature_radii(path_points)
+        turn_directions = _compute_turn_directions(path_points, tangents)
+    
+    all_sections = []
     
     for i, point in enumerate(path_points):
         x, y, z = point
         tx, ty = tangents[i]
         
-        # 垂直方向
+        # 垂直方向（左侧为正方向）
+        # px, py 指向赛道左侧
         px, py = -ty, tx
         
-        outer_top = bm.verts.new((x + px*half_width, y + py*half_width, z + thickness))
-        inner_top = bm.verts.new((x - px*half_width, y - py*half_width, z + thickness))
-        inner_bottom = bm.verts.new((x - px*half_width, y - py*half_width, z))
-        outer_bottom = bm.verts.new((x + px*half_width, y + py*half_width, z))
+        if adaptive_width:
+            # 自适应偏移：根据曲率调整内侧宽度
+            left_offset, right_offset = _get_adaptive_offsets(
+                curvature_radii[i], half_width, turn_directions[i]
+            )
+        else:
+            left_offset = half_width
+            right_offset = half_width
         
-        all_sections.append([outer_top, inner_top, inner_bottom, outer_bottom])
+        # 左侧（正方向）和右侧（负方向）
+        left_top = bm.verts.new((x + px*left_offset, y + py*left_offset, z + thickness))
+        right_top = bm.verts.new((x - px*right_offset, y - py*right_offset, z + thickness))
+        right_bottom = bm.verts.new((x - px*right_offset, y - py*right_offset, z))
+        left_bottom = bm.verts.new((x + px*left_offset, y + py*left_offset, z))
+        
+        # 注意顺序：[left_top, right_top, right_bottom, left_bottom]
+        # 对应原来的 [outer_top, inner_top, inner_bottom, outer_bottom]
+        all_sections.append([left_top, right_top, right_bottom, left_bottom])
     
     bm.verts.ensure_lookup_table()
     
@@ -526,8 +703,8 @@ def _create_track_along_path(name: str,
         
         bm.faces.new([s1[0], s2[0], s2[1], s1[1]])  # 顶
         bm.faces.new([s1[3], s1[2], s2[2], s2[3]])  # 底
-        bm.faces.new([s1[3], s2[3], s2[0], s1[0]])  # 外
-        bm.faces.new([s1[1], s2[1], s2[2], s1[2]])  # 内
+        bm.faces.new([s1[3], s2[3], s2[0], s1[0]])  # 左侧（外）
+        bm.faces.new([s1[1], s2[1], s2[2], s1[2]])  # 右侧（内）
     
     bm.to_mesh(mesh)
     bm.free()
@@ -541,17 +718,23 @@ def _create_barrier_along_path(name: str,
                                 offset: float,
                                 width: float,
                                 height: float,
-                                base_height: float = 0) -> bpy.types.Object:
+                                base_height: float = 0,
+                                track_half_width: float = None,
+                                adaptive_offset: bool = True) -> bpy.types.Object:
     """
     沿路径创建护栏（核心底层函数）
+    
+    使用自适应偏移：在急弯处根据内侧收缩调整护栏位置。
     
     Args:
         name: 名称
         path_points: 路径点列表
-        offset: 相对于路径中心线的偏移（正=外侧）
+        offset: 相对于路径中心线的偏移（正=左侧，负=右侧）
         width: 护栏宽度
         height: 护栏高度
         base_height: 护栏底部相对于路径的高度偏移
+        track_half_width: 赛道半宽（用于自适应偏移计算）
+        adaptive_offset: 是否启用自适应偏移
     """
     import bmesh
     
@@ -567,16 +750,39 @@ def _create_barrier_along_path(name: str,
     smoothing_window = max(3, n // 20)
     tangents = _compute_smooth_tangents(path_points, smoothing_window)
     
+    # 如果启用自适应偏移，计算曲率和转弯方向
+    if adaptive_offset and track_half_width is not None:
+        curvature_radii = _compute_curvature_radii(path_points)
+        turn_directions = _compute_turn_directions(path_points, tangents)
+    else:
+        adaptive_offset = False
+    
     all_sections = []
     half_width = width / 2
     
     for i, point in enumerate(path_points):
         x, y, z = point
         tx, ty = tangents[i]
-        px, py = -ty, tx  # 垂直方向
+        px, py = -ty, tx  # 垂直方向（左侧为正）
         
-        cx = x + px * offset
-        cy = y + py * offset
+        # 计算护栏中心线的偏移
+        if adaptive_offset:
+            # 根据曲率调整偏移
+            left_track_offset, right_track_offset = _get_adaptive_offsets(
+                curvature_radii[i], track_half_width, turn_directions[i]
+            )
+            
+            if offset > 0:
+                # 左侧护栏
+                actual_offset = left_track_offset + half_width
+            else:
+                # 右侧护栏
+                actual_offset = -(right_track_offset + half_width)
+        else:
+            actual_offset = offset
+        
+        cx = x + px * actual_offset
+        cy = y + py * actual_offset
         cz = z + base_height
         
         outer_top = bm.verts.new((cx + px*half_width, cy + py*half_width, cz + height))
@@ -1130,29 +1336,35 @@ def create_track_from_path(
         f"{name}_Surface",
         offset_path,
         track_width,
-        track_thickness
+        track_thickness,
+        adaptive_width=True
     )
     objects.append(track_surface)
     
     # 创建护栏
     if include_barriers:
+        half_width = track_width / 2
         outer_barrier = _create_barrier_along_path(
             f"{name}_Outer_Barrier",
             offset_path,
-            track_width / 2 + barrier_width / 2,
+            half_width + barrier_width / 2,
             barrier_width,
             barrier_height,
-            track_thickness
+            track_thickness,
+            track_half_width=half_width,
+            adaptive_offset=True
         )
         objects.append(outer_barrier)
         
         inner_barrier = _create_barrier_along_path(
             f"{name}_Inner_Barrier",
             offset_path,
-            -(track_width / 2 + barrier_width / 2),
+            -(half_width + barrier_width / 2),
             barrier_width,
             barrier_height,
-            track_thickness
+            track_thickness,
+            track_half_width=half_width,
+            adaptive_offset=True
         )
         objects.append(inner_barrier)
     
@@ -1370,29 +1582,35 @@ def create_figure8_track(
         f"{name}_Surface",
         path_points,
         track_width,
-        track_thickness
+        track_thickness,
+        adaptive_width=True
     )
     objects.append(track_surface)
     
     # 5. 创建护栏
     if include_barriers:
+        half_width = track_width / 2
         outer_barrier = _create_barrier_along_path(
             f"{name}_Outer_Barrier",
             path_points,
-            track_width / 2 + barrier_width / 2,
+            half_width + barrier_width / 2,
             barrier_width,
             barrier_height,
-            track_thickness
+            track_thickness,
+            track_half_width=half_width,
+            adaptive_offset=True
         )
         objects.append(outer_barrier)
         
         inner_barrier = _create_barrier_along_path(
             f"{name}_Inner_Barrier",
             path_points,
-            -(track_width / 2 + barrier_width / 2),
+            -(half_width + barrier_width / 2),
             barrier_width,
             barrier_height,
-            track_thickness
+            track_thickness,
+            track_half_width=half_width,
+            adaptive_offset=True
         )
         objects.append(inner_barrier)
     
@@ -1467,29 +1685,35 @@ def create_custom_track(
         f"{name}_Surface",
         path_points,
         track_width,
-        track_thickness
+        track_thickness,
+        adaptive_width=True
     )
     objects.append(track_surface)
     
-    # 3. 创建护栏
+    # 5. 创建护栏
     if include_barriers:
+        half_width = track_width / 2
         outer_barrier = _create_barrier_along_path(
             f"{name}_Outer_Barrier",
             path_points,
-            track_width / 2 + barrier_width / 2,
+            half_width + barrier_width / 2,
             barrier_width,
             barrier_height,
-            track_thickness
+            track_thickness,
+            track_half_width=half_width,
+            adaptive_offset=True
         )
         objects.append(outer_barrier)
         
         inner_barrier = _create_barrier_along_path(
             f"{name}_Inner_Barrier",
             path_points,
-            -(track_width / 2 + barrier_width / 2),
+            -(half_width + barrier_width / 2),
             barrier_width,
             barrier_height,
-            track_thickness
+            track_thickness,
+            track_half_width=half_width,
+            adaptive_offset=True
         )
         objects.append(inner_barrier)
     

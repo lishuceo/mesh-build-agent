@@ -31,6 +31,70 @@ class GeometryUtils:
     """几何计算工具类"""
     
     @staticmethod
+    def compute_curvature_radius(p0, p1, p2):
+        """
+        计算三点形成的曲率半径（外接圆半径）
+        
+        Args:
+            p0, p1, p2: 三个连续点
+        
+        Returns:
+            曲率半径（越小表示弯曲越急）
+        """
+        # 计算三边长度
+        a = math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+        b = math.sqrt((p0[0] - p2[0])**2 + (p0[1] - p2[1])**2)
+        c = math.sqrt((p0[0] - p1[0])**2 + (p0[1] - p1[1])**2)
+        
+        # 海伦公式计算面积
+        s = (a + b + c) / 2
+        area_sq = s * (s - a) * (s - b) * (s - c)
+        
+        if area_sq <= 0:
+            return float('inf')
+        
+        area = math.sqrt(area_sq)
+        
+        if area < 0.0001:
+            return float('inf')
+        
+        return (a * b * c) / (4 * area)
+    
+    @staticmethod
+    def compute_turn_direction(p0, p1, p2):
+        """
+        计算转弯方向（叉积）
+        
+        Returns:
+            正=左转，负=右转
+        """
+        dx1 = p1[0] - p0[0]
+        dy1 = p1[1] - p0[1]
+        dx2 = p2[0] - p1[0]
+        dy2 = p2[1] - p1[1]
+        return dx1 * dy2 - dy1 * dx2
+    
+    @staticmethod
+    def get_adaptive_offsets(curvature_radius, half_width, turn_direction):
+        """
+        根据曲率半径计算自适应偏移
+        
+        Returns:
+            (left_offset, right_offset)
+        """
+        if curvature_radius > half_width * 3:
+            return half_width, half_width
+        
+        safe_inner_offset = max(0.1, min(half_width, curvature_radius * 0.85 - 0.1))
+        
+        if turn_direction > 0.001:
+            return safe_inner_offset, half_width
+        elif turn_direction < -0.001:
+            return half_width, safe_inner_offset
+        else:
+            return half_width, half_width
+    
+    @staticmethod
     def ccw(A, B, C):
         """判断三点是否逆时针排列"""
         return (C[1] - A[1]) * (B[0] - A[0]) > (B[1] - A[1]) * (C[0] - A[0])
@@ -738,7 +802,7 @@ class TrackCurveEditor:
                 self.canvas.create_text(cx + 12, cy - 12, text=str(i + 1), fill='white', font=('Arial', 9))
     
     def _draw_track_width_preview(self):
-        """绘制赛道宽度预览（两侧边界线）"""
+        """绘制赛道宽度预览（两侧边界线）- 使用自适应偏移"""
         segments_per_section = 20
         curve_points = CatmullRomSpline.generate_curve(
             self.control_points, 
@@ -756,36 +820,48 @@ class TrackCurveEditor:
         
         n = len(curve_points)
         for i in range(n):
-            # 计算切向量（使用相邻点）
             prev_i = (i - 1) % n
             next_i = (i + 1) % n
             
+            # 计算切向量
             tx = curve_points[next_i][0] - curve_points[prev_i][0]
             ty = curve_points[next_i][1] - curve_points[prev_i][1]
             length = math.sqrt(tx * tx + ty * ty)
             
             if length > 0.001:
-                # 归一化切向量
                 tx /= length
                 ty /= length
                 
-                # 法向量（垂直于切向量）
+                # 法向量
                 nx, ny = -ty, tx
                 
-                # 左右边界点
+                # 计算曲率半径和转弯方向
+                curvature_radius = GeometryUtils.compute_curvature_radius(
+                    curve_points[prev_i], curve_points[i], curve_points[next_i]
+                )
+                turn_direction = GeometryUtils.compute_turn_direction(
+                    curve_points[prev_i], curve_points[i], curve_points[next_i]
+                )
+                
+                # 获取自适应偏移
+                left_offset, right_offset = GeometryUtils.get_adaptive_offsets(
+                    curvature_radius, half_width, turn_direction
+                )
+                
+                # 左右边界点（使用自适应偏移）
                 left_pt = (
-                    curve_points[i][0] + nx * half_width,
-                    curve_points[i][1] + ny * half_width
+                    curve_points[i][0] + nx * left_offset,
+                    curve_points[i][1] + ny * left_offset
                 )
                 right_pt = (
-                    curve_points[i][0] - nx * half_width,
-                    curve_points[i][1] - ny * half_width
+                    curve_points[i][0] - nx * right_offset,
+                    curve_points[i][1] - ny * right_offset
                 )
                 
                 left_boundary.append(left_pt)
                 right_boundary.append(right_pt)
         
-        # 绘制左边界（半透明蓝色）
+        # 绘制左边界（蓝色）
         if len(left_boundary) >= 2:
             left_coords = []
             for pt in left_boundary:
