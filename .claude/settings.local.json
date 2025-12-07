@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(blender:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
