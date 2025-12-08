@@ -701,10 +701,11 @@ def _create_track_along_path(name: str,
         j = (i + 1) % n
         s1, s2 = all_sections[i], all_sections[j]
         
-        bm.faces.new([s1[0], s2[0], s2[1], s1[1]])  # 顶
-        bm.faces.new([s1[3], s1[2], s2[2], s2[3]])  # 底
-        bm.faces.new([s1[3], s2[3], s2[0], s1[0]])  # 左侧（外）
-        bm.faces.new([s1[1], s2[1], s2[2], s1[2]])  # 右侧（内）
+        # 顶点顺序决定法线方向（右手法则，逆时针=法线朝向观察者）
+        bm.faces.new([s1[0], s1[1], s2[1], s2[0]])  # 顶面（法线朝上）
+        bm.faces.new([s1[3], s2[3], s2[2], s1[2]])  # 底面（法线朝下）
+        bm.faces.new([s1[3], s1[0], s2[0], s2[3]])  # 左侧面（法线朝外）
+        bm.faces.new([s1[1], s1[2], s2[2], s2[1]])  # 右侧面（法线朝外）
     
     bm.to_mesh(mesh)
     bm.free()
@@ -798,10 +799,11 @@ def _create_barrier_along_path(name: str,
         j = (i + 1) % n
         s1, s2 = all_sections[i], all_sections[j]
         
-        bm.faces.new([s1[0], s2[0], s2[1], s1[1]])
-        bm.faces.new([s1[3], s1[2], s2[2], s2[3]])
-        bm.faces.new([s1[3], s2[3], s2[0], s1[0]])
-        bm.faces.new([s1[1], s2[1], s2[2], s1[2]])
+        # 顶点顺序决定法线方向（右手法则，逆时针=法线朝向观察者）
+        bm.faces.new([s1[0], s1[1], s2[1], s2[0]])  # 顶面（法线朝上）
+        bm.faces.new([s1[3], s2[3], s2[2], s1[2]])  # 底面（法线朝下）
+        bm.faces.new([s1[3], s1[0], s2[0], s2[3]])  # 外侧面（法线朝外）
+        bm.faces.new([s1[1], s1[2], s2[2], s2[1]])  # 内侧面（法线朝外）
     
     bm.to_mesh(mesh)
     bm.free()
@@ -1409,18 +1411,18 @@ def _create_ellipse_ring_mesh(name: str,
     
     bm.verts.ensure_lookup_table()
     
-    # 创建面
+    # 创建面（顶点顺序决定法线方向，右手法则，逆时针=法线朝向观察者）
     for i in range(segments):
         j = (i + 1) % segments
         
-        # 顶面
-        bm.faces.new([top_outer[i], top_outer[j], top_inner[j], top_inner[i]])
-        # 底面
-        bm.faces.new([bottom_outer[i], bottom_inner[i], bottom_inner[j], bottom_outer[j]])
-        # 外侧面
-        bm.faces.new([bottom_outer[i], bottom_outer[j], top_outer[j], top_outer[i]])
-        # 内侧面
-        bm.faces.new([bottom_inner[i], top_inner[i], top_inner[j], bottom_inner[j]])
+        # 顶面（法线朝上）
+        bm.faces.new([top_outer[i], top_inner[i], top_inner[j], top_outer[j]])
+        # 底面（法线朝下）
+        bm.faces.new([bottom_outer[i], bottom_outer[j], bottom_inner[j], bottom_inner[i]])
+        # 外侧面（法线朝外）
+        bm.faces.new([bottom_outer[i], top_outer[i], top_outer[j], bottom_outer[j]])
+        # 内侧面（法线朝内/朝向环心空洞）
+        bm.faces.new([bottom_inner[i], bottom_inner[j], top_inner[j], top_inner[i]])
     
     bm.to_mesh(mesh)
     bm.free()
